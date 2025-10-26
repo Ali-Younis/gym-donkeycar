@@ -174,6 +174,9 @@ class DonkeyUnitySimHandler(IMesgHandler):
         self.vel_y = 0.0
         self.vel_z = 0.0
         self.lidar = []
+        self.num_steps_low_speed = 0
+        self.min_speed = 1
+        self.num_steps = 0
 
         # car in Unity lefthand coordinate system: roll is Z, pitch is X and yaw is Y
         self.roll = 0.0
@@ -426,6 +429,8 @@ class DonkeyUnitySimHandler(IMesgHandler):
         self.current_lap_time = 0.0
         self.last_lap_time = 0.0
         self.lap_count = 0
+        self.num_steps_low_speed = 0
+        self.num_steps = 0
 
         # car
         self.roll = 0.0
@@ -437,6 +442,7 @@ class DonkeyUnitySimHandler(IMesgHandler):
 
     def take_action(self, action: np.ndarray) -> None:
         self.send_control(action[0], action[1])
+        self.num_steps += 1
 
     def observe(self) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
         while self.last_received == self.time_received:
@@ -487,11 +493,12 @@ class DonkeyUnitySimHandler(IMesgHandler):
         # but only attained on a long straight line
         # max_speed = 10
 
-        if done:
+        if done: # collision, missed checkpoint, disqualification, low speed, exceeded CTE (commented out)
             return -1.0
 
-        if self.cte > self.max_cte:
-            return -1.0
+        # Ignoring max_cte penalty
+        # if math.fabs(self.cte) > self.max_cte:
+        #     return -1.0
 
         # Collision
         if self.hit != "none":
@@ -500,6 +507,7 @@ class DonkeyUnitySimHandler(IMesgHandler):
         # going fast close to the center of lane yeilds best reward
         if self.forward_vel > 0.0:
             return (1.0 - (math.fabs(self.cte) / self.max_cte)) * self.forward_vel
+            #return (1.0 - (self.cte / self.max_cte)**2) * (self.speed / max_speed)
 
         # in reverse, reward doesn't have centering term as this can result in some exploits
         return self.forward_vel
@@ -602,14 +610,16 @@ class DonkeyUnitySimHandler(IMesgHandler):
         logger.debug("custom ep_over fn set.")
 
     def determine_episode_over(self):
-        # we have a few initial frames on start that are sometimes very large CTE when it's behind
-        # the path just slightly. We ignore those.
-        if math.fabs(self.cte) > 2 * self.max_cte:
-            pass
-        elif math.fabs(self.cte) > self.max_cte:
-            logger.debug(f"game over: cte {self.cte}")
-            self.over = True
-        elif self.hit != "none":
+        # Ignoring CTE-based termination - only terminate on collisions, missed checkpoints, or low speed
+        # if math.fabs(self.cte) > 2 * self.max_cte:
+        #     if self.num_steps > 10:
+        #         logger.debug(f"game over: cte {self.cte} exceeded 2x max_cte")
+        #         self.over = True
+        # if math.fabs(self.cte) > self.max_cte:
+        #     logger.debug(f"game over: cte {self.cte}")
+        #     self.over = True
+        
+        if self.hit != "none":
             logger.debug(f"game over: hit {self.hit}")
             self.over = True
         elif self.missed_checkpoint:
@@ -618,6 +628,14 @@ class DonkeyUnitySimHandler(IMesgHandler):
         elif self.dq:
             logger.debug("disqualified")
             self.over = True
+        # Check for low speed
+        if abs(self.speed) < self.min_speed and self.num_steps > 100:
+            self.num_steps_low_speed += 1
+            if self.num_steps_low_speed > 10:
+                logger.debug("game over: low speed")
+                self.over = True
+        else:
+            self.num_steps_low_speed = 0
 
         # Disable reset
         if os.environ.get("RACE") == "True":
